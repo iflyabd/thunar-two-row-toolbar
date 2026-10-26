@@ -1,0 +1,360 @@
+--- a/thunar/thunar-window.c
++++ b/thunar/thunar-window.c
+@@ -468,6 +468,10 @@
+ static void
+ thunar_window_location_toolbar_create (ThunarWindow *window);
+ static void
++thunar_window_location_toolbar_merge_rows (ThunarWindow *window);
++static void
++thunar_window_location_toolbar_split_rows (ThunarWindow *window);
++static void
+ thunar_window_update_location_toolbar (ThunarWindow *window);
+ static void
+ thunar_window_update_location_toolbar_icons (ThunarWindow *window);
+@@ -592,6 +596,8 @@
+   /* support for two different styles of location bars */
+   GtkWidget    *location_bar;
+   GtkWidget    *location_toolbar;
++  GtkWidget    *location_toolbar2;      /* second toolbar row (patched) */
++  GtkWidget    *location_toolbar_box;   /* vertical box holding both toolbar rows (patched) */
+   GFileMonitor *uca_file_monitor;
+   GFile        *uca_file;
+ 
+@@ -1053,7 +1059,7 @@
+   gtk_widget_set_visible (GTK_WIDGET (window->spinner), TRUE);
+ 
+   /* check if we need to add the root warning */
+-  if (G_UNLIKELY (geteuid () == 0))
++  if (G_UNLIKELY (geteuid () == 0) && g_getenv ("THUNAR_SHOW_ROOT_WARNING") != NULL)
+     {
+       /* add the bar for the root warning */
+       infobar = gtk_info_bar_new ();
+@@ -1183,6 +1189,8 @@
+ 
+   /* add location toolbar */
+   window->location_toolbar = NULL;
++  window->location_toolbar2 = NULL;
++  window->location_toolbar_box = NULL;
+   thunar_window_location_toolbar_create (window);
+ 
+   /* Create client-side decoration if needed and add menubar and toolbar */
+@@ -1199,7 +1207,7 @@
+   else
+     {
+       gtk_grid_attach (GTK_GRID (window->grid), window->menubar, 0, 0, 1, 1);
+-      gtk_grid_attach (GTK_GRID (window->grid), window->location_toolbar, 0, 1, 1, 1);
++      gtk_grid_attach (GTK_GRID (window->grid), window->location_toolbar_box, 0, 1, 1, 1);
+     }
+ 
+   /* setup setting the location bar visibility on-demand */
+@@ -2044,7 +2052,7 @@
+     return FALSE;
+ 
+   g_object_ref (window->menubar);
+-  g_object_ref (window->location_toolbar);
++  g_object_ref (window->location_toolbar_box);
+ 
+   /* The widget on top of the grid is either the menubar or the toolbar */
+   grid_child = gtk_grid_get_child_at (GTK_GRID (window->grid), 0, 0);
+@@ -2056,7 +2064,7 @@
+   if (window->menubar_visible)
+     {
+       in_header_bar = window->menubar;
+-      below_header_bar = window->location_toolbar;
++      below_header_bar = window->location_toolbar_box;
+ 
+       /* restore default location bar margins */
+       gtk_widget_set_margin_start (window->location_bar, DEFAULT_LOCATION_BAR_MARGIN);
+@@ -2064,7 +2072,7 @@
+     }
+   else
+     {
+-      in_header_bar = window->location_toolbar;
++      in_header_bar = window->location_toolbar_box;
+       below_header_bar = window->menubar;
+ 
+       /* add extra space around the location bar to function as window drag area */
+@@ -2076,7 +2084,7 @@
+   gtk_grid_attach (GTK_GRID (window->grid), below_header_bar, 0, 0, 1, 1);
+ 
+   g_object_unref (window->menubar);
+-  g_object_unref (window->location_toolbar);
++  g_object_unref (window->location_toolbar_box);
+ 
+   return TRUE;
+ }
+@@ -3275,12 +3283,12 @@
+ 
+   if (g_strcmp0 (last_location_bar, g_type_name (G_TYPE_NONE)) == 0)
+     {
+-      gtk_widget_hide (window->location_toolbar);
++      gtk_widget_hide (window->location_toolbar_box);
+       if (window->view != NULL)
+         gtk_widget_grab_focus (window->view);
+     }
+   else
+-    gtk_widget_show (window->location_toolbar);
++    gtk_widget_show (window->location_toolbar_box);
+ 
+   g_free (last_location_bar);
+ }
+@@ -3554,7 +3562,7 @@
+       /* end of workaround */
+ 
+       /* temporary show the location toolbar, even if it is normally hidden */
+-      gtk_widget_show (window->location_toolbar);
++      gtk_widget_show (window->location_toolbar_box);
+       thunar_location_bar_request_entry (THUNAR_LOCATION_BAR (window->location_bar), initial_text, FALSE);
+ 
+       thunar_window_update_search (window);
+@@ -3578,7 +3586,7 @@
+       thunar_window_action_cancel_search (window);
+ 
+       /* temporary show the location toolbar, even if it is normally hidden */
+-      gtk_widget_show (window->location_toolbar);
++      gtk_widget_show (window->location_toolbar_box);
+       thunar_location_bar_request_entry (THUNAR_LOCATION_BAR (window->location_bar), initial_text, temporary_till_focus_lost);
+     }
+ }
+@@ -3598,7 +3606,7 @@
+   window->is_searching = TRUE;
+ 
+   /* temporary show the location toolbar, even if it is normally hidden */
+-  gtk_widget_show (window->location_toolbar);
++  gtk_widget_show (window->location_toolbar_box);
+   thunar_location_bar_request_entry (THUNAR_LOCATION_BAR (window->location_bar), initial_text, FALSE);
+ 
+   /* change to search UI and options */
+@@ -4260,7 +4268,17 @@
+ static gboolean
+ thunar_window_action_show_toolbar_editor (ThunarWindow *window)
+ {
++  gboolean had_rows = (window->location_toolbar2 != NULL);
++
++  /* the editor works on a single toolbar, so merge the rows while it is open */
++  if (had_rows)
++    thunar_window_location_toolbar_merge_rows (window);
++
+   thunar_show_toolbar_editor (GTK_WIDGET (window), window->location_toolbar);
++
++  if (had_rows)
++    thunar_window_location_toolbar_split_rows (window);
++
+   return TRUE;
+ }
+ 
+@@ -6692,6 +6710,112 @@
+ 
+ 
+ 
++/* BEGIN two-row toolbar patch */
++
++
++
++/* move all items of the second toolbar row back into the first row */
++static void
++thunar_window_location_toolbar_merge_rows (ThunarWindow *window)
++{
++  GList *children;
++  GList *lp;
++
++  if (window->location_toolbar2 == NULL)
++    return;
++
++  children = gtk_container_get_children (GTK_CONTAINER (window->location_toolbar2));
++  for (lp = children; lp != NULL; lp = lp->next)
++    {
++      GtkWidget *item = lp->data;
++
++      g_object_ref (item);
++      gtk_container_remove (GTK_CONTAINER (window->location_toolbar2), item);
++      gtk_toolbar_insert (GTK_TOOLBAR (window->location_toolbar), GTK_TOOL_ITEM (item), -1);
++      g_object_unref (item);
++    }
++  g_list_free (children);
++
++  gtk_widget_destroy (window->location_toolbar2);
++  window->location_toolbar2 = NULL;
++}
++
++
++
++/* move every item behind the location bar into a second toolbar row */
++static void
++thunar_window_location_toolbar_split_rows (ThunarWindow *window)
++{
++  GList     *children;
++  GList     *lp;
++  GtkWidget *toolbar2;
++  gboolean   after_location_bar = FALSE;
++  gboolean   small_icons;
++  gint       icon_size;
++
++  _thunar_return_if_fail (THUNAR_IS_WINDOW (window));
++
++  if (window->location_toolbar_box == NULL)
++    return;
++
++  if (window->location_toolbar2 != NULL)
++    thunar_window_location_toolbar_merge_rows (window);
++
++  g_object_get (G_OBJECT (window->preferences), "misc-small-toolbar-icons", &small_icons, NULL);
++  icon_size = small_icons ? GTK_ICON_SIZE_SMALL_TOOLBAR : GTK_ICON_SIZE_LARGE_TOOLBAR;
++
++  toolbar2 = gtk_toolbar_new ();
++  gtk_toolbar_set_style (GTK_TOOLBAR (toolbar2), GTK_TOOLBAR_ICONS);
++  gtk_toolbar_set_icon_size (GTK_TOOLBAR (toolbar2), icon_size);
++  gtk_widget_set_hexpand (toolbar2, TRUE);
++  g_signal_connect (G_OBJECT (toolbar2), "button-press-event", G_CALLBACK (thunar_window_toolbar_button_press_event), window);
++
++  children = gtk_container_get_children (GTK_CONTAINER (window->location_toolbar));
++  for (lp = children; lp != NULL; lp = lp->next)
++    {
++      GtkWidget *item = lp->data;
++      gchar     *id = g_object_get_data (G_OBJECT (item), "id");
++
++      /* the location bar marks the end of the first row */
++      if (g_strcmp0 (id, "location-bar") == 0)
++        {
++          after_location_bar = TRUE;
++          continue;
++        }
++
++      if (!after_location_bar)
++        continue;
++
++      g_object_ref (item);
++      gtk_container_remove (GTK_CONTAINER (window->location_toolbar), item);
++      gtk_toolbar_insert (GTK_TOOLBAR (toolbar2), GTK_TOOL_ITEM (item), -1);
++      g_object_unref (item);
++    }
++  g_list_free (children);
++
++  gtk_box_pack_start (GTK_BOX (window->location_toolbar_box), toolbar2, FALSE, FALSE, 0);
++  gtk_widget_show (toolbar2);
++
++  window->location_toolbar2 = toolbar2;
++}
++
++
++
++/* create the vertical box that holds the toolbar rows */
++static void
++thunar_window_location_toolbar_create_box (ThunarWindow *window)
++{
++  window->location_toolbar_box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
++  gtk_widget_set_hexpand (window->location_toolbar_box, TRUE);
++  gtk_box_pack_start (GTK_BOX (window->location_toolbar_box), window->location_toolbar, FALSE, FALSE, 0);
++  gtk_widget_show (window->location_toolbar);
++  gtk_widget_show (window->location_toolbar_box);
++}
++
++/* END two-row toolbar patch */
++
++
++
+ static void
+ thunar_window_location_toolbar_create (ThunarWindow *window)
+ {
+@@ -6708,6 +6832,8 @@
+   /* setup the toolbar for the location bar */
+   window->location_toolbar = gtk_toolbar_new ();
+   gtk_toolbar_set_style (GTK_TOOLBAR (window->location_toolbar), GTK_TOOLBAR_ICONS);
++  /* the location bar expands, so an overflow arrow is never needed in the first row */
++  gtk_toolbar_set_show_arrow (GTK_TOOLBAR (window->location_toolbar), FALSE);
+   gtk_toolbar_set_icon_size (GTK_TOOLBAR (window->location_toolbar),
+                              small_icons ? GTK_ICON_SIZE_SMALL_TOOLBAR : GTK_ICON_SIZE_LARGE_TOOLBAR);
+   gtk_widget_set_hexpand (window->location_toolbar, TRUE);
+@@ -6779,6 +6905,10 @@
+ 
+   /* load the correct order and visibility of items in the toolbar */
+   thunar_window_location_toolbar_load_items (window);
++
++  /* pack the toolbar in a container and move the trailing items to a second row */
++  thunar_window_location_toolbar_create_box (window);
++  thunar_window_location_toolbar_split_rows (window);
+ }
+ 
+ 
+@@ -6786,10 +6916,16 @@
+ static void
+ thunar_window_update_location_toolbar (ThunarWindow *window)
+ {
+-  gtk_widget_destroy (window->location_toolbar);
++  if (window->location_toolbar_box != NULL)
++    gtk_widget_destroy (window->location_toolbar_box);
++  else if (window->location_toolbar != NULL)
++    gtk_widget_destroy (window->location_toolbar);
++  window->location_toolbar = NULL;
++  window->location_toolbar2 = NULL;
++  window->location_toolbar_box = NULL;
+   thunar_window_location_toolbar_create (window);
+   if (gtk_window_get_titlebar (GTK_WINDOW (window)) == NULL)
+-    gtk_grid_attach (GTK_GRID (window->grid), window->location_toolbar, 0, 1, 1, 1);
++    gtk_grid_attach (GTK_GRID (window->grid), window->location_toolbar_box, 0, 1, 1, 1);
+   thunar_window_csd_update (window);
+ }
+ 
+@@ -6802,6 +6938,10 @@
+   GList     *toolbar_items;
+   GList     *lp;
+ 
++  /* operate on a single toolbar while updating the icons */
++  if (window->location_toolbar2 != NULL)
++    thunar_window_location_toolbar_merge_rows (window);
++
+   toolbar_items = gtk_container_get_children (GTK_CONTAINER (window->location_toolbar));
+ 
+   for (lp = toolbar_items; lp != NULL; lp = lp->next)
+@@ -6847,6 +6987,9 @@
+   thunar_window_view_switcher_update (window);
+ 
+   g_list_free (toolbar_items);
++
++  /* restore the second toolbar row */
++  thunar_window_location_toolbar_split_rows (window);
+ }
+ 
+ 
+@@ -7231,6 +7374,10 @@
+   if (window->location_toolbar == NULL)
+     return;
+ 
++  /* operate on a single toolbar while changing the visibility */
++  if (window->location_toolbar2 != NULL)
++    thunar_window_location_toolbar_merge_rows (window);
++
+   toolbar_items = gtk_container_get_children (GTK_CONTAINER (window->location_toolbar));
+   lp = toolbar_items;
+ 
+@@ -7250,6 +7397,9 @@
+     }
+ 
+   g_list_free (toolbar_items);
++
++  /* restore the second toolbar row */
++  thunar_window_location_toolbar_split_rows (window);
+ }
+ 
+ 
+@@ -7270,6 +7420,10 @@
+   if (window->location_toolbar == NULL)
+     return;
+ 
++  /* operate on a single toolbar while swapping the items */
++  if (window->location_toolbar2 != NULL)
++    thunar_window_location_toolbar_merge_rows (window);
++
+   toolbar_items = gtk_container_get_children (GTK_CONTAINER (window->location_toolbar));
+   lp = toolbar_items;
+ 
+@@ -7298,6 +7452,9 @@
+   g_object_unref (item_b);
+ 
+   g_list_free (toolbar_items);
++
++  /* restore the second toolbar row */
++  thunar_window_location_toolbar_split_rows (window);
+ }
+ 
+ 
